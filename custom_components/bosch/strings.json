@@ -46,9 +46,9 @@
             "title": "Bosch options",
             "description": "Configure energy data source and other options.",
             "data": {
-              "new_stats_api": "Write energy data to HA statistics (required for Energy Dashboard). Note: Ignored when POINTT is enabled - POINTT always writes hourly statistics.",
-              "optimistic_mode": "Use optimistic mode for some functions (currently CT200 Operation mode set).",
-              "experimental_pointt_api": "[EXPERIMENTAL] Use POINTT cloud API for HOURLY energy data (like the Bosch app). Completely replaces local energy readings with real hourly data."
+              "new_stats_api": "Write energy data to HA statistics (required for Energy Dashboard). Uses local API with daily data divided by 24 hours. Ignored when POINTT is enabled.",
+              "optimistic_mode": "Optimistic mode: UI updates immediately without waiting for device confirmation. Enable if CT200 operation mode changes feel slow or unresponsive.",
+              "experimental_pointt_api": "[EXPERIMENTAL] POINTT cloud API for real hourly energy data (CT200 only). Requires Bosch account login. Replaces local energy sensors with cloud data. Overrides 'Write energy data to HA statistics' setting - statistics are always written when enabled."
             }
           },
           "pointt_credentials": {

@@ -226,10 +226,16 @@ async def main() -> None:
         expires_in = tokens.get("expires_in", 0)
         token_type = tokens.get("token_type", "")
 
-        print(f"\n[OK] access_token:    {access_token[:40]}...")
-        print(f"[OK] token_type:      {token_type}")
+        print(f"\n[OK] token_type:      {token_type}")
         print(f"[OK] expires_in:      {expires_in}s")
         print(f"[OK] refresh_token:   {'present' if refresh_token else 'MISSING'}")
+        print()
+        print("=" * 60)
+        print("FULL TOKENS (copy these):")
+        print("=" * 60)
+        print(f"ACCESS_TOKEN={access_token}")
+        print()
+        print(f"REFRESH_TOKEN={refresh_token}")
 
         # Step 4: test API
         log.info("Testing access token against POINTTAPI for device %s...", device_id)

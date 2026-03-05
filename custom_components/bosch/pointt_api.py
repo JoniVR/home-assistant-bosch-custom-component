@@ -169,6 +169,10 @@ class PointtEnergyClient:
         self._token_data = token_data
         self._token_update_callback = token_update_callback
         self._base_url = f"{POINTTAPI_BASE}{device_id}/resource/"
+        # Cache to avoid duplicate API calls from multiple sensors
+        self._cache: list[dict] = []
+        self._cache_time: datetime | None = None
+        self._cache_ttl = timedelta(minutes=5)
 
     async def _ensure_token(self) -> str:
         """Ensure we have a valid token, refresh if needed."""
@@ -208,97 +212,107 @@ class PointtEnergyClient:
             return await resp.text()
 
     async def get_hourly_energy(self, days: int = 3) -> list[dict]:
-        """Get energy data from POINTT API.
+        """Get HOURLY energy data from POINTT API.
 
-        Note: The POINTT /energy/history endpoint returns DAILY data, not hourly.
-        Format: [{"d": "DD-MM-YYYY", "T": temp, "gCh": kWh, "gHw": kWh}, ...]
+        Uses /energy/historyHourly endpoint with pagination (via ?next=N).
+        Returns real hourly data up to the current hour.
+        Results are cached for 5 minutes to avoid duplicate API calls.
 
         Returns list of:
         [{"datetime": datetime, "ch": kWh, "hw": kWh}, ...]
         """
+        # Return cached data if still valid
+        now = datetime.now(timezone.utc)
+        if self._cache and self._cache_time and (now - self._cache_time) < self._cache_ttl:
+            _LOGGER.debug("POINTT: Returning cached data (%d entries)", len(self._cache))
+            return self._cache
+
+        all_entries = []
+        next_page = None
+        page = 0
+        max_pages = 20  # Safety limit
+
         try:
-            # Try to get energy history
-            data = await self._get("/energy/history")
-            _LOGGER.debug("POINTT energy/history response type: %s", type(data))
+            while page < max_pages:
+                page += 1
 
-            if isinstance(data, list):
-                return self._parse_energy_data(data)
-            elif isinstance(data, dict):
-                # POINTT returns: {"id": "/energy/history", "value": [...]}
-                if "value" in data:
-                    return self._parse_energy_data(data["value"])
-                if "entries" in data:
-                    return self._parse_energy_data(data["entries"])
-                if "history" in data:
-                    return self._parse_energy_data(data["history"])
+                # Build URL with pagination
+                if next_page:
+                    path = f"/energy/historyHourly?next={next_page}"
+                else:
+                    path = "/energy/historyHourly"
 
-            _LOGGER.warning("POINTT: Unexpected energy data format: %s", str(data)[:200])
-            return []
+                data = await self._get(path)
+
+                if not isinstance(data, dict):
+                    _LOGGER.warning("POINTT: Unexpected response type: %s", type(data))
+                    break
+
+                # Structure: {"value": [{"entries": [...], "next": N}]}
+                value = data.get("value", [])
+                if not value or not isinstance(value, list):
+                    break
+
+                first_block = value[0] if value else {}
+                entries = first_block.get("entries", [])
+
+                if entries:
+                    all_entries.extend(entries)
+
+                # Check for next page
+                next_page = first_block.get("next")
+                if not next_page:
+                    break
+
+            if not all_entries:
+                _LOGGER.warning("POINTT: No entries in historyHourly")
+                return []
+
+            result = self._parse_hourly_data(all_entries)
+
+            if result:
+                oldest = min(e["datetime"] for e in result)
+                latest = max(e["datetime"] for e in result)
+                _LOGGER.info("POINTT: Got %d hourly entries from %s to %s", len(result), oldest, latest)
+
+                # Cache the result
+                self._cache = result
+                self._cache_time = datetime.now(timezone.utc)
+
+            return result
 
         except Exception as err:
-            _LOGGER.error("POINTT: Failed to fetch energy data: %s", err)
+            _LOGGER.error("POINTT: Failed to fetch hourly energy data: %s", err)
             return []
 
-    def _parse_energy_data(self, data: list) -> list[dict]:
-        """Parse energy data from API response.
+    def _parse_hourly_data(self, entries: list) -> list[dict]:
+        """Parse hourly energy data from historyHourly endpoint.
 
-        POINTT API returns daily data in format:
-        [{"d": "08-11-2022", "T": 14.8, "gCh": 4.05, "gHw": 0.0}, ...]
+        Input format: [{"d": "02-03-2026", "h": "14", "T": 8.9, "gCh": 0.56, "gHw": 0.15}, ...]
         """
         result = []
 
-        for entry in data:
+        for entry in entries:
             try:
-                # Try various date formats
-                dt = None
-                for key in ["datetime", "timestamp", "date", "d", "time"]:
-                    if key in entry and entry[key]:
-                        val = entry[key]
-                        if isinstance(val, str):
-                            # Try parsing with various formats
-                            for fmt in [
-                                "%d-%m-%Y",  # POINTT format: "08-11-2022"
-                                "%Y-%m-%dT%H:%M:%S%z",
-                                "%Y-%m-%dT%H:%M:%SZ",
-                                "%Y-%m-%dT%H:%M:%S",
-                                "%Y-%m-%d %H:%M:%S",
-                                "%Y-%m-%d",
-                            ]:
-                                try:
-                                    dt = datetime.strptime(val, fmt)
-                                    break
-                                except ValueError:
-                                    continue
-                        elif isinstance(val, (int, float)):
-                            dt = datetime.fromtimestamp(val, tz=timezone.utc)
-                        if dt:
-                            break
+                date_str = entry.get("d")  # "DD-MM-YYYY"
+                hour_str = entry.get("h")  # "0" to "23"
 
-                if not dt:
-                    _LOGGER.debug("POINTT: Could not parse date from entry: %s", entry)
+                if not date_str or hour_str is None:
                     continue
 
-                # Ensure datetime is timezone-aware (UTC)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                # Parse date and hour
+                dt = datetime.strptime(f"{date_str} {hour_str}", "%d-%m-%Y %H")
+                dt = dt.replace(tzinfo=timezone.utc)
 
-                # Get energy values (gCh = gas central heating, gHw = gas hot water)
-                ch = 0
-                hw = 0
-                for ch_key in ["gCh", "ch", "eCH", "centralHeating", "heating", "gasHeating"]:
-                    if ch_key in entry and entry[ch_key] is not None:
-                        ch = float(entry[ch_key])
-                        break
-                for hw_key in ["gHw", "hw", "eHW", "hotWater", "water", "gasHotWater"]:
-                    if hw_key in entry and entry[hw_key] is not None:
-                        hw = float(entry[hw_key])
-                        break
+                # Get energy values
+                ch = float(entry.get("gCh", 0) or 0)
+                hw = float(entry.get("gHw", 0) or 0)
 
                 result.append({"datetime": dt, "ch": ch, "hw": hw})
 
             except (ValueError, KeyError, TypeError) as err:
-                _LOGGER.debug("POINTT: Error parsing entry %s: %s", entry, err)
+                _LOGGER.debug("POINTT: Error parsing hourly entry %s: %s", entry, err)
                 continue
 
-        _LOGGER.info("POINTT: Parsed %d energy entries", len(result))
+        _LOGGER.info("POINTT: Parsed %d hourly energy entries", len(result))
         return result

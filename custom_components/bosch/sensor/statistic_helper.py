@@ -74,6 +74,7 @@ class StatisticHelper(BoschBaseSensor):
         return StatisticMetaData(
             has_mean=False,
             has_sum=True,
+            mean_type=0,  # 0=none, 1=arithmetic, 2=circular - Required for HA 2026.11+
             name=f"Stats {self._name}",
             source=self._domain_name.lower(),
             statistic_id=self.statistic_id,
@@ -111,7 +112,8 @@ class StatisticHelper(BoschBaseSensor):
             return
         # Set state to cumulative sum from last statistic entry
         # This enables both Energy Dashboard AND entity state display
-        self._state = stats[-1].sum
+        # StatisticData is a TypedDict, so access with ["sum"] not .sum
+        self._state = stats[-1]["sum"]
         async_add_external_statistics(self.hass, self.statistic_metadata, stats)
         self.async_schedule_update_ha_state()
 

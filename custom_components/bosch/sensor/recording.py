@@ -52,7 +52,7 @@ class RecordingSensor(StatisticHelper):
         """Old async update."""
         data = self._bosch_object.get_property(self._attr_uri)
         now = dt_util.now()
-        if not data and not data.get(VALUE):
+        if not data or not data.get(VALUE):
             return
 
         def get_last_full_hour() -> datetime:
@@ -82,13 +82,19 @@ class RecordingSensor(StatisticHelper):
                 "Invoking external statistic function for %s.",
                 self.statistic_id,
             )
-            async with self._statistic_import_lock:
-                await self._insert_statistics()
+            try:
+                async with self._statistic_import_lock:
+                    await self._insert_statistics()
+            except Exception as err:
+                _LOGGER.error("Failed to insert statistics for %s: %s", self.statistic_id, err)
             # Ensure state is set from last statistic (for entity display)
             await self._update_state_from_statistics()
         else:
             _LOGGER.debug("Old gather data algorithm.")
             await self.async_old_gather_update()
+
+        # Always notify HA of state changes (required since should_poll=False)
+        self.async_schedule_update_ha_state()
 
     async def _upsert_past_statistics(
         self, start: datetime, stop: datetime
