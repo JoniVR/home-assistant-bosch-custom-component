@@ -44,11 +44,38 @@
     "step": {
       "init": {
         "title": "Bosch options",
+        "description": "Configure energy data source and other options.",
         "data": {
-          "new_stats_api": "Use new statistic API",
-          "optimistic_mode": "Use optimistic mode for some functions (currently Easycontrol Operation mode set)."
+          "new_stats_api": "Write energy data to HA statistics (required for Energy Dashboard). Note: Ignored when POINTT is enabled - POINTT always writes hourly statistics.",
+          "optimistic_mode": "Use optimistic mode for some functions (currently Easycontrol Operation mode set).",
+          "experimental_pointt_api": "[EXPERIMENTAL] Use POINTT cloud API for HOURLY energy data (like the Bosch app). Completely replaces local energy readings with real hourly data."
+        }
+      },
+      "pointt_credentials": {
+        "title": "POINTT API Authentication",
+        "description": "Choose authentication method. First run: pip install uv && uv run --with playwright python -m playwright install chromium",
+        "data": {
+          "pointt_auth_method": "Authentication method"
+        }
+      },
+      "pointt_callback": {
+        "title": "POINTT Callback URL",
+        "description": "Run ./scripts/run_playwright_ha.sh and log in with your SingleKey-ID. Copy the callback URL and paste it here.",
+        "data": {
+          "pointt_callback_url": "Callback URL"
+        }
+      },
+      "pointt_tokens": {
+        "title": "POINTT Direct Tokens",
+        "description": "Enter access and refresh tokens. Run ./scripts/run_playwright.sh to get both tokens.",
+        "data": {
+          "pointt_access_token": "Access Token",
+          "pointt_refresh_token": "Refresh Token"
         }
       }
+    },
+    "error": {
+      "pointt_auth_failed": "POINTT authentication failed. Check your credentials."
     }
   }
 }

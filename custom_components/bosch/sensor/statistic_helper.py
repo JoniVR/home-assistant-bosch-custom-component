@@ -107,11 +107,27 @@ class StatisticHelper(BoschBaseSensor):
 
     def add_external_stats(self, stats: list[StatisticData]) -> None:
         """Add external statistics."""
-        self._state = -17
         if not stats:
             return
+        # Set state to cumulative sum from last statistic entry
+        # This enables both Energy Dashboard AND entity state display
+        self._state = stats[-1].sum
         async_add_external_statistics(self.hass, self.statistic_metadata, stats)
         self.async_schedule_update_ha_state()
+
+    async def _update_state_from_statistics(self) -> None:
+        """Update entity state from last statistic in database."""
+        try:
+            last_stat = await self.get_last_stat()
+            if last_stat and self.statistic_id in last_stat and last_stat[self.statistic_id]:
+                self._state = last_stat[self.statistic_id][0].get("sum", 0)
+            elif self._state is None:
+                # No statistics yet, set to 0
+                self._state = 0
+        except Exception as err:
+            _LOGGER.debug("Could not get last stat for state update: %s", err)
+            if self._state is None:
+                self._state = 0
 
     def get_last_stats_before_date(
         self, last_stats: dict[str, list[StatisticsRow]], day: datetime

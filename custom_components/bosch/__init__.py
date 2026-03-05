@@ -73,6 +73,7 @@ from .const import (
     GATEWAY,
     INTERVAL,
     NOTIFICATION_ID,
+    POINTT_CLIENT,
     RECORDING_INTERVAL,
     SCAN_INTERVAL,
     SIGNAL_BINARY_SENSOR_UPDATE_BOSCH,
@@ -224,6 +225,7 @@ class BoschGatewayEntry:
         self._signal_registered = False
         self.supported_platforms = []
         self._update_lock = None
+        self.pointt_client = None  # POINTT API client (experimental)
 
     @property
     def device_id(self) -> str:
@@ -272,12 +274,77 @@ class BoschGatewayEntry:
             if GATEWAY in self.hass.data[DOMAIN][self.uuid]:
                 _LOGGER.debug("Registering debug services.")
                 async_register_debug_service(hass=self.hass, entry=self)
+
+            # Initialize POINTT API if experimental option is enabled
+            await self._init_pointt_api()
+
             _LOGGER.debug(
                 "Bosch component registered with platforms %s.",
                 self.supported_platforms,
             )
             return True
         return False
+
+    async def _init_pointt_api(self) -> None:
+        """Initialize POINTT API client if experimental option is enabled."""
+        if not self.config_entry.options.get("experimental_pointt_api", False):
+            return
+
+        _LOGGER.info("Initializing experimental POINTT API...")
+        try:
+            from .pointt_api import PointtEnergyClient, is_token_expired
+
+            # Get stored tokens
+            stored_tokens = self.config_entry.options.get("pointt_tokens")
+            if not stored_tokens:
+                _LOGGER.warning(
+                    "POINTT: No tokens configured. Please reconfigure the integration "
+                    "and complete the POINTT login flow."
+                )
+                return
+
+            # Check if tokens are still valid (with 5 minute margin)
+            if is_token_expired(stored_tokens.get("expires_at")):
+                _LOGGER.info("POINTT: Access token expired, will refresh on first use")
+
+            session = async_get_clientsession(self.hass)
+
+            # Get device ID (serial number without dashes)
+            # self.uuid contains the Bosch serial number (e.g. "101021162")
+            device_id = self.uuid.replace("-", "")
+            _LOGGER.debug("POINTT: Using device ID: %s", device_id)
+
+            # Callback to update stored tokens when refreshed
+            async def token_update_callback(new_tokens: dict) -> None:
+                """Save new tokens to config entry options."""
+                _LOGGER.debug("POINTT: Saving refreshed tokens")
+                new_options = {**self.config_entry.options, "pointt_tokens": new_tokens}
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, options=new_options
+                )
+
+            # Create the energy client
+            self.pointt_client = PointtEnergyClient(
+                device_id=device_id,
+                session=session,
+                token_data=stored_tokens,
+                token_update_callback=token_update_callback,
+            )
+
+            # Store in hass.data for sensors to access
+            self.hass.data[DOMAIN][self.uuid][POINTT_CLIENT] = self.pointt_client
+            _LOGGER.info("POINTT API client initialized for device %s", device_id)
+
+            # Test fetch to verify connection
+            try:
+                hourly_data = await self.pointt_client.get_hourly_energy(days=1)
+                _LOGGER.info("POINTT: Test fetch returned %d entries", len(hourly_data))
+            except Exception as err:
+                _LOGGER.warning("POINTT: Test fetch failed (will retry later): %s", err)
+
+        except Exception as err:
+            _LOGGER.error("POINTT API initialization failed: %s", err)
+            self.pointt_client = None
 
     @callback
     def async_get_signals(self) -> None:

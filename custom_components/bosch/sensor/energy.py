@@ -18,7 +18,7 @@ from homeassistant.components.recorder.models import (
 )
 
 
-from ..const import SIGNAL_ENERGY_UPDATE_BOSCH, VALUE
+from ..const import DOMAIN, POINTT_CLIENT, SIGNAL_ENERGY_UPDATE_BOSCH, VALUE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,11 +89,12 @@ class EnergySensor(StatisticHelper):
         self._attr_device_class = sensor_attributes.get(
             "deviceClass", SensorDeviceClass.ENERGY
         )
-        if (
-            self._attr_state_class
-            and self._attr_device_class == SensorDeviceClass.TEMPERATURE
-        ):
-            self._attr_device_class = SensorStateClass.MEASUREMENT
+        # Set state_class based on device_class for Energy Dashboard compatibility
+        if self._attr_device_class == SensorDeviceClass.TEMPERATURE:
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+        elif self._attr_device_class in (SensorDeviceClass.ENERGY, SensorDeviceClass.GAS):
+            # TOTAL for cumulative energy/gas values - required for Energy Dashboard price tracking
+            self._attr_state_class = SensorStateClass.TOTAL
 
     @property
     def device_name(self) -> str:
@@ -121,19 +122,23 @@ class EnergySensor(StatisticHelper):
             _LOGGER.debug("Energy sensor data not available %s", self._name)
             self._state = STATE_UNAVAILABLE
 
-        if self._new_stats_api and (
-            self._unit_of_measurement == UnitOfEnergy.KILO_WATT_HOUR
-            or self._unit_of_measurement == UnitOfVolume.CUBIC_METERS
-        ):
+        # Handle based on sensor type
+        if self._unit_of_measurement in (UnitOfEnergy.KILO_WATT_HOUR, UnitOfVolume.CUBIC_METERS):
+            # Energy/Gas sensors: ALWAYS write statistics and use cumulative state
+            # This ensures state_class=TOTAL is correct and state matches statistics
             await self._insert_statistics()
+            await self._update_state_from_statistics()
         else:
+            # Temperature or other sensors: set state directly from current value
             if self._normalize:
                 self._state = self._normalize(value.get(self._attr_read_key))
             else:
                 self._state = value.get(self._attr_read_key)
+
         if self._update_init:
             self._update_init = False
-            self.async_schedule_update_ha_state()
+        # Always notify HA of state changes (required since should_poll=False)
+        self.async_schedule_update_ha_state()
 
     @property
     def statistic_id(self) -> str:
@@ -233,8 +238,93 @@ class EnergySensor(StatisticHelper):
         self.add_external_stats(stats=statistics_to_push)
         return sum
 
+    def _get_pointt_client(self):
+        """Get POINTT client if available."""
+        try:
+            return self.hass.data[DOMAIN][self._uuid].get(POINTT_CLIENT)
+        except (KeyError, TypeError):
+            return None
+
+    async def _insert_pointt_hourly_statistics(self) -> bool:
+        """Fetch hourly data from POINTT and insert into statistics.
+
+        Returns True if POINTT was used, False otherwise.
+        """
+        pointt = self._get_pointt_client()
+        if not pointt:
+            return False
+
+        try:
+            _LOGGER.debug("POINTT: Fetching hourly energy data...")
+            hourly_data = await pointt.get_hourly_energy(days=3)
+
+            if not hourly_data:
+                _LOGGER.warning("POINTT: No hourly data returned")
+                return False
+
+            # Get last stat to determine starting sum
+            last_stat = await self.get_last_stat()
+            _sum = 0
+            last_recorded_time = None
+
+            if last_stat and self.statistic_id in last_stat and last_stat[self.statistic_id]:
+                last_row = last_stat[self.statistic_id][0]
+                _sum = last_row.get("sum", 0)
+                last_recorded_time = timestamp_to_datetime_or_none(last_row.get("start"))
+
+            # Build statistics from hourly data
+            # Key is "ch" for central heating or "hw" for hot water
+            attr_key = "ch" if "CH" in self._read_attr_to_search else "hw"
+
+            statistics_to_push = []
+            for entry in sorted(hourly_data, key=lambda x: x["datetime"]):
+                entry_time = entry["datetime"]
+
+                # Skip entries we already have
+                if last_recorded_time and entry_time <= last_recorded_time:
+                    continue
+
+                # Get the value for this sensor type
+                value = entry.get(attr_key, 0) or 0
+                _sum = round(_sum + value, 3)
+
+                statistics_to_push.append(
+                    StatisticData(
+                        start=entry_time,
+                        state=value,
+                        sum=_sum,
+                    )
+                )
+
+            if statistics_to_push:
+                _LOGGER.info(
+                    "POINTT: Inserting %d hourly statistics for %s",
+                    len(statistics_to_push),
+                    self.statistic_id
+                )
+                self.add_external_stats(stats=statistics_to_push)
+            else:
+                _LOGGER.debug("POINTT: No new hourly data to insert")
+
+            return True
+
+        except Exception as err:
+            _LOGGER.error("POINTT: Failed to fetch/insert hourly data: %s", err)
+            return False
+
     async def _insert_statistics(self) -> None:
-        """Insert statistics from the past."""
+        """Insert statistics - uses POINTT if enabled, otherwise local API."""
+        pointt = self._get_pointt_client()
+
+        if pointt:
+            # POINTT is enabled - use ONLY POINTT, no fallback
+            await self._insert_pointt_hourly_statistics()
+        else:
+            # POINTT not enabled - use local API (daily data divided by 24)
+            await self._insert_statistics_local()
+
+    async def _insert_statistics_local(self) -> None:
+        """Insert statistics from local API (original behavior)."""
         _sum = 0
         last_stat = await self.get_last_stat()
         if len(last_stat) == 0 or len(last_stat[self.statistic_id]) == 0:

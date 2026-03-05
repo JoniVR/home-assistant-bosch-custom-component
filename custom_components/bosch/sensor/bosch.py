@@ -11,4 +11,8 @@ class BoschSensor(BoschBaseSensor):
 
     @property
     def device_name(self):
+        """Return device name for grouping in HA."""
+        # Use parent_id if available for more specific grouping
+        if self._bosch_object and self._bosch_object.parent_id:
+            return f"Bosch {self._bosch_object.parent_id}"
         return "Bosch sensors"

@@ -47,7 +47,6 @@ class RecordingSensor(StatisticHelper):
         self._attr_last_reset = last_reset
         if self._update_init:
             self._update_init = False
-            self.async_schedule_update_ha_state()
 
     async def async_old_gather_update(self) -> None:
         """Old async update."""
@@ -85,6 +84,8 @@ class RecordingSensor(StatisticHelper):
             )
             async with self._statistic_import_lock:
                 await self._insert_statistics()
+            # Ensure state is set from last statistic (for entity display)
+            await self._update_state_from_statistics()
         else:
             _LOGGER.debug("Old gather data algorithm.")
             await self.async_old_gather_update()

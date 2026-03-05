@@ -208,10 +208,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
         """Display option dialog."""
         if user_input is not None:
+            # If POINTT enabled, go to credentials step
+            if user_input.get("experimental_pointt_api"):
+                self._options = user_input
+                return await self.async_step_pointt_credentials()
             return self.async_create_entry(title="", data=user_input)
 
         new_stats_api = self.entry.options.get("new_stats_api", False)
         optimistic_mode = self.entry.options.get("optimistic_mode", False)
+        experimental_pointt = self.entry.options.get("experimental_pointt_api", False)
 
         return self.async_show_form(
             step_id="init",
@@ -219,6 +224,108 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 {
                     vol.Optional("new_stats_api", default=new_stats_api): bool,
                     vol.Optional("optimistic_mode", default=optimistic_mode): bool,
+                    vol.Optional("experimental_pointt_api", default=experimental_pointt): bool,
                 }
             ),
+        )
+
+    async def async_step_pointt_credentials(self, user_input=None):
+        """Handle POINTT API - choose authentication method."""
+        # Store options for next step
+        if not hasattr(self, "_options"):
+            self._options = {}
+
+        if user_input is not None:
+            auth_method = user_input.get("pointt_auth_method", "callback")
+            if auth_method == "tokens":
+                return await self.async_step_pointt_tokens()
+            else:
+                return await self.async_step_pointt_callback()
+
+        return self.async_show_form(
+            step_id="pointt_credentials",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("pointt_auth_method", default="callback"): vol.In({
+                        "callback": "Callback URL (recommended - use Playwright helper)",
+                        "tokens": "Direct token input",
+                    }),
+                }
+            ),
+        )
+
+    async def async_step_pointt_callback(self, user_input=None):
+        """Handle POINTT API - accept callback URL from user."""
+        errors = {}
+
+        if user_input is not None:
+            callback_url = user_input.get("pointt_callback_url", "")
+
+            from .pointt_api import extract_code_from_callback, exchange_code_for_tokens, PointtAuthError
+            from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+            # Extract authorization code from callback URL
+            code = extract_code_from_callback(callback_url)
+            if not code:
+                errors["base"] = "pointt_auth_failed"
+            else:
+                # Exchange code for tokens
+                session = async_get_clientsession(self.hass)
+                try:
+                    tokens = await exchange_code_for_tokens(session, code)
+                    # Success! Store tokens
+                    data = {
+                        **self._options,
+                        "pointt_tokens": tokens,
+                    }
+                    return self.async_create_entry(title="", data=data)
+                except PointtAuthError:
+                    errors["base"] = "pointt_auth_failed"
+
+        return self.async_show_form(
+            step_id="pointt_callback",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("pointt_callback_url"): str,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_pointt_tokens(self, user_input=None):
+        """Handle POINTT API - direct token input."""
+        errors = {}
+
+        if user_input is not None:
+            from datetime import datetime, timedelta, timezone
+
+            access_token = user_input.get("pointt_access_token", "").strip()
+            refresh_token = user_input.get("pointt_refresh_token", "").strip()
+
+            if not access_token or not refresh_token:
+                errors["base"] = "pointt_auth_failed"
+            else:
+                # Create token data structure
+                # Assume token expires in 1 hour (will be refreshed automatically)
+                expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+                tokens = {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "expires_at": expires_at.isoformat(),
+                }
+                data = {
+                    **self._options,
+                    "pointt_tokens": tokens,
+                }
+                return self.async_create_entry(title="", data=data)
+
+        return self.async_show_form(
+            step_id="pointt_tokens",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("pointt_access_token"): str,
+                    vol.Required("pointt_refresh_token"): str,
+                }
+            ),
+            errors=errors,
         )
