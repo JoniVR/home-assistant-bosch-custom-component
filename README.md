@@ -1,74 +1,129 @@
-# home-assistant-bosch-custom-component
+# Bosch Thermostat Custom Component for Home Assistant
 
-HA custom component for Bosch thermostats.
-If you like this component consider sponsoring my work: [:heart: Sponsor](https://github.com/sponsors/pszafer)
+Home Assistant custom component for Bosch thermostats with **real hourly energy data** support for EasyControl CT200 via POINTT cloud API.
 
-**Second maintainer needed!**
+**Latest version requires Home Assistant 2025.7+ and Python >= 3.12.**
 
-**Hi, I'm looking for help to make this component better**
-https://github.com/bosch-thermostat/home-assistant-bosch-custom-component/issues/414
+## Supported Devices
 
-**Latest version will only work with Home Assistant 2025.7 and Python >=3.12.**
-For older HA look into release notes.
-
-If possible and if it's ok with you please enable Home Assistant Analytics so I can see how many people uses this integration.
-
-Supported protocols:
-
-- XMPP -> connect to bosch cloud!
-- HTTP -> connect locally - available only for IVT devices.
-
-Supported types of devices:
-
-- IVT (HTTP/XMPP):
-  - RC300
-  - RC200
-  - RC35
-  - RC30
-  - RC20
-- NEFIT(XMPP only):
-  - Junkers CT100
-  - Bosch Remote room controller CT100
-- EASYCONTROL(XMPP only):
-  - Bosch CT200
-  - Buderus Logamatic TC100.2
+| Device Type | Protocol | Energy Data |
+|-------------|----------|-------------|
+| **EasyControl CT200** | XMPP (cloud) | Hourly via POINTT API |
+| **Buderus Logamatic TC100.2** | XMPP (cloud) | Hourly via POINTT API |
+| IVT RC300/RC200/RC35/RC30/RC20 | HTTP (local) or XMPP | Hourly via local API |
+| NEFIT/Junkers CT100 | XMPP (cloud) | Daily only |
 
 ## Installation
 
-Please find an installation guide (https://github.com/bosch-thermostat/home-assistant-bosch-custom-component/wiki/Home-Assistant-Installation-Guide) in the wiki and further information.
+### HACS (Recommended)
 
-## Manually
+1. Open HACS in Home Assistant
+2. Go to **Integrations**
+3. Click the three dots menu (top right) → **Custom repositories**
+4. Add this repository URL and select **Integration** as the category
+5. Search for "Bosch thermostat" and install
+6. Restart Home Assistant
 
-Download this repository into your configuration directory.
+### Manual Installation
 
-## HACS
-
-Preferred way. Go to https://hacs.xyz/ and learn more about installation of custom components.
+1. Download this repository
+2. Copy the `custom_components/bosch` folder to your Home Assistant `config/custom_components/` directory
+3. Restart Home Assistant
 
 ## Configuration
 
-### Integration.
+1. Go to **Settings → Devices & Services**
+2. Click **+ Add Integration**
+3. Search for "Bosch thermostat"
+4. Follow the setup wizard:
+   - Choose your device type (IVT, NEFIT, or EasyControl)
+   - Enter your device credentials (IP/serial, access token, password)
 
-Go to integration page, add Bosch component and follow on going screens.
-By default all sensors are disabled!
-Go to integration device `Bosch sensors` and enable sensor you'd like to see.
-If you have troubles, go to **wiki** and read more detailed installation instructions.
+**Note**: All sensors are disabled by default. Go to the integration device "Bosch sensors" and enable the sensors you want.
 
-# Help
+---
 
-Any help appreciated.
-Open PR or issue.
+## POINTT API for Hourly Energy Data (CT200/TC100.2)
 
-Always attach debugscan if you have any troubles or something is missing.
-To make debugscan go to HA developer tools -> Services and choose
+The EasyControl CT200 local API only provides **daily** energy totals. To get **real hourly** energy data (like the Bosch mobile app), you can enable the experimental POINTT cloud API.
 
-## Home Assistant debugging log
+### Why Use POINTT API?
 
-In case of a working integration within Home Assistant you may find issues in the way the Bosch environment is visible within HA. To identify the root cause, a debug log is helpful. To obtain these log, please follow the guidenance in the wiki https://github.com/bosch-thermostat/home-assistant-bosch-custom-component/wiki/Home-Assistant-Obtain-Debug-Logs.
+| Feature | Local API | POINTT API |
+|---------|-----------|------------|
+| Data granularity | Daily totals | **Real hourly** |
+| Energy Dashboard | Works, but inaccurate | **Accurate hourly stats** |
+| Price correlation | Not possible | **Works correctly** |
+| Internet required | No | Yes |
 
-Example logger config for debugging:
+### Prerequisites
 
+You need `uv` (Python package runner) and Playwright installed:
+
+```bash
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install Playwright browser (one-time setup)
+uv run --with playwright python -m playwright install chromium
 ```
+
+### Setup Steps
+
+1. **Enable POINTT API** in integration options:
+   - Go to **Settings → Devices & Services → Bosch**
+   - Click **Configure**
+   - Check **"POINTT cloud API for real hourly energy data"**
+   - Select authentication method: **"Callback URL"**
+
+2. **Run the authentication script**:
+   ```bash
+   cd /path/to/home-assistant-bosch-custom-component
+   ./scripts/run_playwright_ha.sh
+   ```
+
+3. **Log in** with your Bosch/SingleKey-ID account in the browser window that opens
+
+4. **Copy the callback URL** that appears after login
+
+5. **Paste the URL** into Home Assistant and submit
+
+The integration will exchange the code for tokens and start fetching hourly energy data automatically.
+
+### Token Expiration
+
+POINTT tokens expire periodically. When this happens:
+- You'll see a **Repair** notification in Home Assistant
+- Energy data will stop updating
+- Re-run `./scripts/run_playwright_ha.sh` and paste the new callback URL
+
+### Alternative: Direct Token Entry
+
+If you prefer to manage tokens manually:
+
+1. Run `./scripts/run_playwright.sh` (full OAuth flow)
+2. Copy the ACCESS_TOKEN and REFRESH_TOKEN from the output
+3. In HA options, choose **"Direct tokens"** and paste both values
+
+---
+
+## Integration Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| **Write energy data to HA statistics** | On | Required for Energy Dashboard. Writes external statistics with hourly granularity. |
+| **Optimistic mode** | Off | Climate entity updates immediately without waiting for device confirmation. Enable if CT200 operation mode changes feel slow. |
+| **POINTT cloud API** | Off | **(CT200 only)** Fetches real hourly energy data from Bosch cloud. Replaces local energy sensors with accurate cloud data. |
+
+---
+
+## Debugging
+
+### Enable Debug Logging
+
+Add to your `configuration.yaml`:
+
+```yaml
 logger:
   default: warning
   logs:
@@ -76,16 +131,63 @@ logger:
     bosch_thermostat_client: debug
 ```
 
-## Bosch system scan via raw scan
+### Debug Scan
 
-The integration allows a raw scan of the connected Bosch devices via Home Assistant or Linux system. This is useful, if your installation fails or does not show devices or sensors you know to be existing.
+To scan your Bosch device for all available endpoints:
 
-Detailed guidance can be found at https://github.com/bosch-thermostat/home-assistant-bosch-custom-component/wiki/Trace-File-of-Communication-with-Bosch-Device-(Dev-Raw-Scan)
+1. Go to **Developer Tools → Services**
+2. Call `bosch.debug_scan`
+3. Download the JSON from `<config>/www/bosch_scan.json`
 
-**bosch.debug_scan** .
+---
 
-Download `json` file and attach it somewhere. The `json` file is stored under <hass-config>/www/bosch_scan.json. Please make sure the www folder exists prior to running the scan.
+## Troubleshooting
 
-# First config help needed.
+### POINTT API Issues
 
-Come to Discord channel https://discord.gg/WeWQGNR and let's try to figure out if you have unknown device for us or if there is issue with component.
+**"Token refresh failed: 400 - invalid_grant"**
+- The refresh token has expired
+- Re-run `./scripts/run_playwright_ha.sh` and paste the new callback URL
+
+**"No hourly data returned"**
+- Check if POINTT API is enabled in options
+- Verify tokens are valid (check for repair notification)
+- The POINTT API only provides ~3 days of hourly history
+
+**Browser doesn't open for OAuth**
+- Make sure Playwright is installed: `uv run --with playwright python -m playwright install chromium`
+- Try running with full output: `uv run --with playwright --with playwright-stealth --with aiohttp python scripts/pointt_oauth_playwright.py --ha`
+
+### Energy Dashboard Not Showing Data
+
+1. Ensure "Write energy data to HA statistics" is enabled
+2. Wait for the next update cycle (every hour at :06)
+3. Check **Developer Tools → Statistics** for entries starting with `energy:` or `recording:`
+
+---
+
+## Architecture
+
+For technical details on how the POINTT API integration works, see [docs/POINTT_API_ARCHITECTURE.md](docs/POINTT_API_ARCHITECTURE.md).
+
+---
+
+## Contributing
+
+Issues and pull requests welcome!
+
+When reporting issues:
+- Attach a debug scan (`bosch.debug_scan` service)
+- Include relevant log excerpts with debug logging enabled
+- Specify your device model and HA version
+
+---
+
+## Credits
+
+- Original component by [@pszafer](https://github.com/pszafer)
+- POINTT API implementation based on research from [ha_bosch](https://github.com/CaseyRo/ha_bosch)
+
+## License
+
+This project is licensed under the MIT License.

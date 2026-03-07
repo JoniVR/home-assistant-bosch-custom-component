@@ -1,5 +1,8 @@
 # POINTT API Architecture for Bosch EasyControl CT200
 
+> **For user setup instructions, see the [main README](../README.md).**
+> This document is for developers and advanced users who want to understand how the POINTT API integration works.
+
 ## Overview
 
 The Bosch EasyControl CT200 thermostat does **not** expose hourly energy data via its local API. The local API (`/energy/history`) only returns **daily totals**. However, the Bosch mobile app shows real hourly energy data by using the **POINTT cloud API**.
@@ -218,11 +221,31 @@ The POINTT integration writes to **External Statistics** for Energy Dashboard co
 
 ## Scripts
 
+### Prerequisites
+
+```bash
+# Install uv (Python package runner) - one time
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install Playwright browser - one time
+uv run --with playwright python -m playwright install chromium
+```
+
+### Available Scripts
+
 | Script | Purpose |
 |--------|---------|
 | `scripts/run_playwright_ha.sh` | Automated OAuth login, outputs callback URL for HA |
-| `scripts/run_playwright.sh` | Full OAuth flow, outputs both tokens |
-| `scripts/explore_api.sh` | Debug script to explore POINTT API endpoints |
+| `scripts/run_playwright.sh` | Full OAuth flow, outputs both tokens and tests API |
+| `scripts/pointt_oauth_manual.py` | Manual OAuth flow (for debugging) |
+
+### How the OAuth Scripts Work
+
+1. **Playwright** launches a Chromium browser with stealth mode (bypasses bot detection)
+2. User logs in to Bosch SingleKey-ID
+3. Script intercepts the OAuth callback redirect (custom `com.bosch.tt.dashtt.pointt://` scheme)
+4. For `--ha` mode: prints the callback URL for pasting into Home Assistant
+5. For full mode: exchanges the code for tokens and tests the API
 
 ## Limitations
 
@@ -238,3 +261,40 @@ The POINTT integration writes to **External Statistics** for Energy Dashboard co
 - [ ] Configurable poll interval for POINTT data
 - [ ] Separate sensors for POINTT data (vs modifying existing energy sensors)
 - [ ] Support for other Bosch devices that use POINTT API
+
+---
+
+## GitHub Issue Template
+
+Use this template when reporting POINTT API issues:
+
+```markdown
+### Device Information
+- **Device**: Bosch EasyControl CT200 / Buderus TC100.2
+- **Serial**: (first 4 digits only)
+- **HA Version**:
+- **Integration Version**:
+
+### Issue Description
+<!-- Describe what's happening -->
+
+### Expected Behavior
+<!-- What should happen -->
+
+### Debug Logs
+<!-- Enable debug logging and paste relevant logs -->
+```yaml
+logger:
+  logs:
+    custom_components.bosch: debug
+    custom_components.bosch.pointt_api: debug
+```
+
+### Steps to Reproduce
+1.
+2.
+3.
+
+### Additional Context
+<!-- Screenshots, debug scan output, etc. -->
+```
