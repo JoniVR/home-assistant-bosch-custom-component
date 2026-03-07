@@ -77,5 +77,11 @@
         "error": {
           "pointt_auth_failed": "POINTT authentication failed. Check your credentials."
         }
-      }
+      },
+    "issues": {
+        "pointt_auth_failed": {
+            "title": "POINTT API authentication expired",
+            "description": "The POINTT API session for device **{device_id}** has expired. Hourly energy data is not being updated.\n\nTo fix this:\n1. Go to **Settings → Devices & Services → Bosch**\n2. Click **Configure**\n3. Disable and re-enable **POINTT API**\n4. Run the Playwright script and paste the new callback URL"
+        }
+    }
 }

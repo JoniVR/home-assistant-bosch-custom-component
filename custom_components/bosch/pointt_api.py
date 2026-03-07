@@ -4,6 +4,7 @@ Uses OAuth2 authorization code flow with PKCE (same as Bosch mobile app).
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
@@ -12,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote, urlencode
 
 import aiohttp
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -117,8 +120,9 @@ async def refresh_access_token(session: aiohttp.ClientSession, refresh_token: st
 
     async with session.post(TOKEN_URL, data=data) as resp:
         if resp.status != 200:
-            _LOGGER.warning("Token refresh failed: %s", resp.status)
-            raise PointtAuthError("Token refresh failed")
+            body = await resp.text()
+            _LOGGER.warning("Token refresh failed: %s - %s", resp.status, body[:200])
+            raise PointtAuthError(f"Token refresh failed: {resp.status}")
 
         result = await resp.json()
 
@@ -127,6 +131,8 @@ async def refresh_access_token(session: aiohttp.ClientSession, refresh_token: st
 
     expires_in = result.get("expires_in", 3600)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+
+    _LOGGER.debug("Token refreshed successfully, expires in %ds", expires_in)
 
     return {
         "access_token": result["access_token"],
@@ -146,11 +152,34 @@ def is_token_expired(expires_at: str | None, margin_seconds: int = 300) -> bool:
         return True
 
 
+ISSUE_ID_POINTT_AUTH = "pointt_auth_failed"
+
+
+def create_pointt_auth_issue(hass: HomeAssistant, device_id: str) -> None:
+    """Create a repair issue for POINTT authentication failure."""
+    _LOGGER.warning("POINTT: Creating repair issue for auth failure (device: %s)", device_id)
+    ir.async_create_issue(
+        hass,
+        "bosch",
+        f"{ISSUE_ID_POINTT_AUTH}_{device_id}",
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key="pointt_auth_failed",
+        translation_placeholders={"device_id": device_id},
+    )
+
+
+def clear_pointt_auth_issue(hass: HomeAssistant, device_id: str) -> None:
+    """Clear the POINTT authentication repair issue."""
+    ir.async_delete_issue(hass, "bosch", f"{ISSUE_ID_POINTT_AUTH}_{device_id}")
+
+
 class PointtEnergyClient:
     """POINTT API client for fetching hourly energy data."""
 
     def __init__(
         self,
+        hass: HomeAssistant,
         device_id: str,
         session: aiohttp.ClientSession,
         token_data: dict,
@@ -159,11 +188,13 @@ class PointtEnergyClient:
         """Initialize client.
 
         Args:
+            hass: Home Assistant instance
             device_id: Gateway serial number (without dashes)
             session: aiohttp session
             token_data: Dict with access_token, refresh_token, expires_at
             token_update_callback: Called with new token_data when refreshed
         """
+        self._hass = hass
         self._device_id = device_id
         self._session = session
         self._token_data = token_data
@@ -173,20 +204,41 @@ class PointtEnergyClient:
         self._cache: list[dict] = []
         self._cache_time: datetime | None = None
         self._cache_ttl = timedelta(minutes=5)
+        # Lock to prevent concurrent token refresh and API calls
+        self._fetch_lock = asyncio.Lock()
+        # Track auth failure state
+        self._auth_failed = False
 
     async def _ensure_token(self) -> str:
         """Ensure we have a valid token, refresh if needed."""
+        # Skip if auth has already failed (prevents duplicate refresh attempts)
+        if self._auth_failed:
+            raise PointtAuthError("Auth previously failed, re-authentication required")
+
         if is_token_expired(self._token_data.get("expires_at")):
             refresh_token = self._token_data.get("refresh_token")
             if not refresh_token:
+                self._auth_failed = True
+                create_pointt_auth_issue(self._hass, self._device_id)
                 raise PointtAuthError("No refresh token available")
 
             _LOGGER.debug("POINTT: Refreshing access token...")
-            new_tokens = await refresh_access_token(self._session, refresh_token)
-            self._token_data = new_tokens
+            try:
+                new_tokens = await refresh_access_token(self._session, refresh_token)
+                self._token_data = new_tokens
 
-            if self._token_update_callback:
-                await self._token_update_callback(new_tokens)
+                if self._token_update_callback:
+                    await self._token_update_callback(new_tokens)
+
+                # Clear any previous auth failure
+                if self._auth_failed:
+                    self._auth_failed = False
+                    clear_pointt_auth_issue(self._hass, self._device_id)
+
+            except PointtAuthError:
+                self._auth_failed = True
+                create_pointt_auth_issue(self._hass, self._device_id)
+                raise
 
         return self._token_data.get("access_token", "")
 
@@ -221,69 +273,71 @@ class PointtEnergyClient:
         Returns list of:
         [{"datetime": datetime, "ch": kWh, "hw": kWh}, ...]
         """
-        # Return cached data if still valid
-        now = datetime.now(timezone.utc)
-        if self._cache and self._cache_time and (now - self._cache_time) < self._cache_ttl:
-            _LOGGER.debug("POINTT: Returning cached data (%d entries)", len(self._cache))
-            return self._cache
+        # Use lock to prevent concurrent fetches (avoids duplicate token refresh)
+        async with self._fetch_lock:
+            # Return cached data if still valid
+            now = datetime.now(timezone.utc)
+            if self._cache and self._cache_time and (now - self._cache_time) < self._cache_ttl:
+                _LOGGER.debug("POINTT: Returning cached data (%d entries)", len(self._cache))
+                return self._cache
 
-        all_entries = []
-        next_page = None
-        page = 0
-        max_pages = 20  # Safety limit
+            all_entries = []
+            next_page = None
+            page = 0
+            max_pages = 20  # Safety limit
 
-        try:
-            while page < max_pages:
-                page += 1
+            try:
+                while page < max_pages:
+                    page += 1
 
-                # Build URL with pagination
-                if next_page:
-                    path = f"/energy/historyHourly?next={next_page}"
-                else:
-                    path = "/energy/historyHourly"
+                    # Build URL with pagination
+                    if next_page:
+                        path = f"/energy/historyHourly?next={next_page}"
+                    else:
+                        path = "/energy/historyHourly"
 
-                data = await self._get(path)
+                    data = await self._get(path)
 
-                if not isinstance(data, dict):
-                    _LOGGER.warning("POINTT: Unexpected response type: %s", type(data))
-                    break
+                    if not isinstance(data, dict):
+                        _LOGGER.warning("POINTT: Unexpected response type: %s", type(data))
+                        break
 
-                # Structure: {"value": [{"entries": [...], "next": N}]}
-                value = data.get("value", [])
-                if not value or not isinstance(value, list):
-                    break
+                    # Structure: {"value": [{"entries": [...], "next": N}]}
+                    value = data.get("value", [])
+                    if not value or not isinstance(value, list):
+                        break
 
-                first_block = value[0] if value else {}
-                entries = first_block.get("entries", [])
+                    first_block = value[0] if value else {}
+                    entries = first_block.get("entries", [])
 
-                if entries:
-                    all_entries.extend(entries)
+                    if entries:
+                        all_entries.extend(entries)
 
-                # Check for next page
-                next_page = first_block.get("next")
-                if not next_page:
-                    break
+                    # Check for next page
+                    next_page = first_block.get("next")
+                    if not next_page:
+                        break
 
-            if not all_entries:
-                _LOGGER.warning("POINTT: No entries in historyHourly")
+                if not all_entries:
+                    _LOGGER.warning("POINTT: No entries in historyHourly")
+                    return []
+
+                result = self._parse_hourly_data(all_entries)
+
+                if result:
+                    oldest = min(e["datetime"] for e in result)
+                    latest = max(e["datetime"] for e in result)
+                    _LOGGER.info("POINTT: Got %d hourly entries from %s to %s", len(result), oldest, latest)
+
+                    # Cache the result
+                    self._cache = result
+                    self._cache_time = datetime.now(timezone.utc)
+
+                return result
+
+            except Exception as err:
+                _LOGGER.error("POINTT: Failed to fetch hourly energy data: %s", err)
                 return []
-
-            result = self._parse_hourly_data(all_entries)
-
-            if result:
-                oldest = min(e["datetime"] for e in result)
-                latest = max(e["datetime"] for e in result)
-                _LOGGER.info("POINTT: Got %d hourly entries from %s to %s", len(result), oldest, latest)
-
-                # Cache the result
-                self._cache = result
-                self._cache_time = datetime.now(timezone.utc)
-
-            return result
-
-        except Exception as err:
-            _LOGGER.error("POINTT: Failed to fetch hourly energy data: %s", err)
-            return []
 
     def _parse_hourly_data(self, entries: list) -> list[dict]:
         """Parse hourly energy data from historyHourly endpoint.

@@ -175,6 +175,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     remove_entry(INTERVAL)
     remove_entry(FW_INTERVAL)
     remove_entry(RECORDING_INTERVAL)
+
+    # Clear any POINTT auth repair issues
+    try:
+        from .pointt_api import clear_pointt_auth_issue
+        device_id = uuid.replace("-", "")
+        clear_pointt_auth_issue(hass, device_id)
+    except Exception:
+        pass
+
     bosch = hass.data[DOMAIN].pop(uuid)
     unload_ok = await bosch[BOSCH_GATEWAY_ENTRY].async_reset()
     async_remove_services(hass, entry)
@@ -292,7 +301,7 @@ class BoschGatewayEntry:
 
         _LOGGER.info("Initializing experimental POINTT API...")
         try:
-            from .pointt_api import PointtEnergyClient, is_token_expired
+            from .pointt_api import PointtEnergyClient, is_token_expired, clear_pointt_auth_issue
 
             # Get stored tokens
             stored_tokens = self.config_entry.options.get("pointt_tokens")
@@ -325,6 +334,7 @@ class BoschGatewayEntry:
 
             # Create the energy client
             self.pointt_client = PointtEnergyClient(
+                hass=self.hass,
                 device_id=device_id,
                 session=session,
                 token_data=stored_tokens,
