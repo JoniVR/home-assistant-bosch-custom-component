@@ -570,7 +570,7 @@ class BoschGatewayEntry:
 
     async def async_reset(self) -> bool:
         """Reset this device to default state."""
-        _LOGGER.warning("Unloading Bosch module.")
+        _LOGGER.debug("Unloading Bosch module.")
         _LOGGER.debug("Closing connection to gateway.")
         tasks: list[Awaitable] = [
             self.hass.config_entries.async_forward_entry_unload(
