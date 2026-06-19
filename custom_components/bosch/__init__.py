@@ -127,9 +127,22 @@ TASK = "task"
 
 DATA_CONFIGS = "bosch_configs"
 
+# Per-entry snapshot (keyed by entry_id) of the options whose change should
+# trigger a reload. The experimental POINTT client persists a refreshed OAuth
+# token into entry.options roughly hourly; that rotating blob is excluded so a
+# token refresh does NOT reload the integration (which would flap every Bosch
+# entity to "unavailable" for a few seconds every hour).
+OPTIONS_SIGNATURE = "options_signature"
+POINTT_TOKENS = "pointt_tokens"
+
 _LOGGER = logging.getLogger(__name__)
 
 HOUR = timedelta(hours=1)
+
+
+def _reload_relevant_options(entry: ConfigEntry) -> dict:
+    """Return the options whose change warrants a reload (sans POINTT tokens)."""
+    return {k: v for k, v in entry.options.items() if k != POINTT_TOKENS}
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType):
@@ -154,6 +167,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         entry=entry,
     )
     hass.data[DOMAIN][uuid] = {BOSCH_GATEWAY_ENTRY: gateway_entry}
+    hass.data[DOMAIN].setdefault(OPTIONS_SIGNATURE, {})[
+        entry.entry_id
+    ] = _reload_relevant_options(entry)
     _init_status: bool = await gateway_entry.async_init()
     if not _init_status:
         return _init_status
@@ -184,6 +200,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     except Exception:
         pass
 
+    hass.data[DOMAIN].get(OPTIONS_SIGNATURE, {}).pop(entry.entry_id, None)
     bosch = hass.data[DOMAIN].pop(uuid)
     unload_ok = await bosch[BOSCH_GATEWAY_ENTRY].async_reset()
     async_remove_services(hass, entry)
@@ -191,7 +208,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
 
 
 async def async_update_options(hass: HomeAssistant, entry: ConfigEntry):
-    """Reload entry if options change."""
+    """Reload entry when options change — except for POINTT token refreshes.
+
+    The POINTT client persists refreshed OAuth tokens into entry.options about
+    once an hour. The running client already holds the new token in memory
+    (PointtEnergyClient sets self._token_data before invoking the persist
+    callback), so reloading on a token-only change is unnecessary and makes
+    every Bosch entity flap to "unavailable" for a few seconds each hour. Only
+    reload when something other than the rotating tokens actually changed.
+    """
+    signatures = hass.data[DOMAIN].setdefault(OPTIONS_SIGNATURE, {})
+    new_signature = _reload_relevant_options(entry)
+    if signatures.get(entry.entry_id) == new_signature:
+        _LOGGER.debug(
+            "Only POINTT tokens changed for entry %s; skipping reload.",
+            entry.entry_id,
+        )
+        return
+    signatures[entry.entry_id] = new_signature
     _LOGGER.debug("Reloading entry %s", entry.entry_id)
     await hass.config_entries.async_reload(entry.entry_id)
 
