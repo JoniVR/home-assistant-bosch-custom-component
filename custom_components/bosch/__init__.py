@@ -9,6 +9,7 @@ from datetime import timedelta
 from typing import Any
 
 import homeassistant.helpers.config_validation as cv
+from homeassistant.util.ssl import create_client_context
 import voluptuous as vol
 from bosch_thermostat_client.const import (
     DHW,
@@ -281,6 +282,42 @@ class BoschGatewayEntry:
         _LOGGER.debug("Initializing Bosch integration.")
         self._update_lock = asyncio.Lock()
         BoschGateway = bosch.gateway_chooser(device_type=self._device_type)
+        if self._protocol != HTTP:
+            # slixmpp creates a new SSL context in its constructor, which loads
+            # certificates synchronously. Supply Home Assistant's pre-warmed
+            # context while keeping all asyncio objects on the main event loop.
+            from bosch_thermostat_client.connectors import xmpp as xmpp_connector
+
+            client_class = xmpp_connector.BoschClientXMPP
+            if not getattr(client_class, "_ha_ssl_context_patched", False):
+                from bosch_thermostat_client.connectors.easycontrol import (
+                    EasycontrolConnector,
+                )
+
+                def create_bosch_ssl_context():
+                    context = create_client_context()
+                    context.load_verify_locations(
+                        cafile=EasycontrolConnector.ca_certs
+                    )
+                    return context
+
+                ssl_context = await self.hass.async_add_executor_job(
+                    create_bosch_ssl_context
+                )
+                original_init = client_class.__init__
+
+                def init_with_ha_ssl(client, *args, **kwargs):
+                    kwargs.setdefault("ssl_context", ssl_context)
+                    # The Bosch CA has already been loaded above; clearing this
+                    # prevents slixmpp from synchronously loading it again in
+                    # get_ssl_context() when connect() runs.
+                    if kwargs.get("ca_certs") == EasycontrolConnector.ca_certs:
+                        kwargs["ca_certs"] = None
+                    original_init(client, *args, **kwargs)
+
+                client_class.__init__ = init_with_ha_ssl
+                client_class._ha_ssl_context_patched = True
+
         self.gateway = BoschGateway(
             session=async_get_clientsession(self.hass, verify_ssl=False)
             if self._protocol == HTTP

@@ -37,6 +37,7 @@ class StatisticHelper(BoschBaseSensor):
         self._short_id = None
         self._new_stats_api = new_stats_api
         self._statistic_import_lock = asyncio.Lock()
+        self._statistics_written = False
         super().__init__(**kwargs)
 
     async def move_old_entity_data_to_new(self, event_time=None) -> None:
@@ -129,6 +130,7 @@ class StatisticHelper(BoschBaseSensor):
         # This enables both Energy Dashboard AND entity state display
         # StatisticData is a TypedDict, so access with ["sum"] not .sum
         self._state = stats[-1]["sum"]
+        self._statistics_written = True
         async_add_external_statistics(self.hass, self.statistic_metadata, stats)
         self.async_schedule_update_ha_state()
 
@@ -137,7 +139,22 @@ class StatisticHelper(BoschBaseSensor):
         try:
             last_stat = await self.get_last_stat()
             if last_stat and self.statistic_id in last_stat and last_stat[self.statistic_id]:
-                self._state = last_stat[self.statistic_id][0].get("sum", 0)
+                recorded_sum = last_stat[self.statistic_id][0].get("sum", 0)
+                # These entities expose cumulative lifetime totals. A freshly queued
+                # external-statistics write may not be committed when this read runs;
+                # never let that recorder race move the entity backwards.
+                try:
+                    if self._state is not None and float(recorded_sum) < float(self._state):
+                        _LOGGER.debug(
+                            "Ignoring stale statistic for %s: %s < %s",
+                            self.statistic_id,
+                            recorded_sum,
+                            self._state,
+                        )
+                        return
+                except (TypeError, ValueError):
+                    pass
+                self._state = recorded_sum
             elif self._state is None:
                 # No statistics yet, set to 0
                 self._state = 0

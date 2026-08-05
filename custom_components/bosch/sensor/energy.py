@@ -126,8 +126,13 @@ class EnergySensor(StatisticHelper):
         if self._unit_of_measurement in (UnitOfEnergy.KILO_WATT_HOUR, UnitOfVolume.CUBIC_METERS):
             # Energy/Gas sensors: ALWAYS write statistics and use cumulative state
             # This ensures state_class=TOTAL is correct and state matches statistics
+            self._statistics_written = False
             await self._insert_statistics()
-            await self._update_state_from_statistics()
+            # add_external_stats already selected the newest cumulative sum. Reading
+            # recorder immediately would race its asynchronous commit and can return
+            # the previous hour/day, briefly moving this lifetime total backwards.
+            if not self._statistics_written:
+                await self._update_state_from_statistics()
         else:
             # Temperature or other sensors: set state directly from current value
             if self._normalize:
