@@ -90,6 +90,21 @@ uv run --with playwright python -m playwright install chromium
 
 The integration will exchange the code for tokens and start fetching hourly energy data automatically.
 
+### Hour timestamps and backfills
+
+POINTT reports the gateway's local wall-clock hour. The integration converts
+that hour through Home Assistant's configured timezone before storing UTC
+statistics. Nonexistent spring-forward hours and ambiguous fall-back hours are
+skipped because POINTT supplies neither a UTC offset nor a documented ordering
+contract that would identify the correct occurrence. Newly fetched or
+backfilled hours are written to the existing external POINTT statistic IDs; no
+replacement entities or statistic IDs are created. The integration does not
+automatically rewrite Recorder-owned statistics for
+`sensor.energy_central_heating` or `sensor.energy_hot_water`, because partial
+cumulative-history rewrites are not retry-safe. Those entity statistics and
+Home Assistant's state-change-driven generated cost sensors still require a
+supported in-place correction after an authentication gap.
+
 ### Token Expiration
 
 POINTT tokens expire periodically. When this happens:

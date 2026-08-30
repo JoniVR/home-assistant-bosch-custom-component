@@ -11,6 +11,7 @@ import logging
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote, urlencode
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from homeassistant.core import HomeAssistant
@@ -200,6 +201,7 @@ class PointtEnergyClient:
         self._token_data = token_data
         self._token_update_callback = token_update_callback
         self._base_url = f"{POINTTAPI_BASE}{device_id}/resource/"
+        self._local_timezone = ZoneInfo(hass.config.time_zone or "UTC")
         # Cache to avoid duplicate API calls from multiple sensors
         self._cache: list[dict] = []
         self._cache_time: datetime | None = None
@@ -345,6 +347,7 @@ class PointtEnergyClient:
         Input format: [{"d": "02-03-2026", "h": "14", "T": 8.9, "gCh": 0.56, "gHw": 0.15}, ...]
         """
         result = []
+        seen_utc_hours: set[datetime] = set()
 
         for entry in entries:
             try:
@@ -354,13 +357,63 @@ class PointtEnergyClient:
                 if not date_str or hour_str is None:
                     continue
 
-                # Parse date and hour
-                dt = datetime.strptime(f"{date_str} {hour_str}", "%d-%m-%Y %H")
-                dt = dt.replace(tzinfo=timezone.utc)
+                # POINTT returns the gateway's local wall-clock hour. Resolve it
+                # through the configured Home Assistant timezone before storing
+                # UTC statistics. POINTT supplies neither an offset nor a
+                # documented ordering contract, so ambiguous autumn hours
+                # cannot be assigned to folds safely and must be rejected.
+                local_dt = datetime.strptime(
+                    f"{date_str} {hour_str}", "%d-%m-%Y %H"
+                )
 
-                # Get energy values
-                ch = float(entry.get("gCh", 0) or 0)
-                hw = float(entry.get("gHw", 0) or 0)
+                utc_candidates = []
+                for fold in (0, 1):
+                    candidate = local_dt.replace(
+                        tzinfo=self._local_timezone, fold=fold
+                    ).astimezone(timezone.utc)
+                    round_trip = candidate.astimezone(
+                        self._local_timezone
+                    ).replace(tzinfo=None)
+                    if round_trip == local_dt and candidate not in utc_candidates:
+                        utc_candidates.append(candidate)
+
+                if not utc_candidates:
+                    _LOGGER.warning(
+                        "POINTT: Skipping nonexistent local hour %s %s in %s",
+                        date_str,
+                        hour_str,
+                        self._local_timezone,
+                    )
+                    continue
+
+                if len(utc_candidates) > 1:
+                    _LOGGER.warning(
+                        "POINTT: Skipping ambiguous local hour %s %s in %s",
+                        date_str,
+                        hour_str,
+                        self._local_timezone,
+                    )
+                    continue
+
+                dt = utc_candidates[0]
+
+                # Validate the complete energy payload before reserving the UTC
+                # hour. A malformed/incomplete duplicate must not suppress a
+                # later valid entry for the same hour.
+                if "gCh" not in entry or "gHw" not in entry:
+                    _LOGGER.debug(
+                        "POINTT: Skipping incomplete hourly entry %s", entry
+                    )
+                    continue
+                ch = float(entry["gCh"] or 0)
+                hw = float(entry["gHw"] or 0)
+
+                if dt in seen_utc_hours:
+                    _LOGGER.debug(
+                        "POINTT: Skipping duplicate hourly entry for %s", dt
+                    )
+                    continue
+                seen_utc_hours.add(dt)
 
                 result.append({"datetime": dt, "ch": ch, "hw": hw})
 

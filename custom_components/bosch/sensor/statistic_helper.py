@@ -116,7 +116,7 @@ class StatisticHelper(BoschBaseSensor):
             self.hass,
             start_time,
             end_time,
-            [self.statistic_id],
+            {self.statistic_id},
             "hour",
             None,
             {"state", "sum"},
@@ -139,7 +139,13 @@ class StatisticHelper(BoschBaseSensor):
         try:
             last_stat = await self.get_last_stat()
             if last_stat and self.statistic_id in last_stat and last_stat[self.statistic_id]:
-                recorded_sum = last_stat[self.statistic_id][0].get("sum", 0)
+                recorded_sum = last_stat[self.statistic_id][0].get("sum")
+                if recorded_sum is None:
+                    _LOGGER.debug(
+                        "Statistic for %s has no cumulative sum; keeping entity state unknown",
+                        self.statistic_id,
+                    )
+                    return
                 # These entities expose cumulative lifetime totals. A freshly queued
                 # external-statistics write may not be committed when this read runs;
                 # never let that recorder race move the entity backwards.
@@ -156,12 +162,16 @@ class StatisticHelper(BoschBaseSensor):
                     pass
                 self._state = recorded_sum
             elif self._state is None:
-                # No statistics yet, set to 0
-                self._state = 0
+                # A cumulative lifetime total must never be synthesized as zero.
+                # Publishing 0 here can make a later successful statistics write
+                # look like real consumption to Home Assistant's generated cost
+                # sensor. Keep the entity unknown until a real sum is available.
+                _LOGGER.debug(
+                    "No statistic available for %s; keeping entity state unknown",
+                    self.statistic_id,
+                )
         except Exception as err:
             _LOGGER.debug("Could not get last stat for state update: %s", err)
-            if self._state is None:
-                self._state = 0
 
     def get_last_stats_before_date(
         self, last_stats: dict[str, list[StatisticsRow]], day: datetime
