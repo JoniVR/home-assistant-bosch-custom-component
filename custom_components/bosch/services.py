@@ -57,9 +57,14 @@ def find_gateway_entry(hass: HomeAssistant, devices_id: str) -> list[ConfigEntry
             )
     bosch_gateway_entries = []
     for entry in hass.data[DOMAIN].values():
+        # The domain also contains per-entry POINTT option signatures.
+        # These are bookkeeping, not gateways that can handle services.
+        gateway_entry = entry.get(BOSCH_GATEWAY_ENTRY)
+        if gateway_entry is None:
+            continue
         for config_entry in config_entries:
-            if entry[BOSCH_GATEWAY_ENTRY].device_id == config_entry.entry_id:
-                bosch_gateway_entries.append(entry[BOSCH_GATEWAY_ENTRY])
+            if gateway_entry.device_id == config_entry.entry_id:
+                bosch_gateway_entries.append(gateway_entry)
     return bosch_gateway_entries
 
 
